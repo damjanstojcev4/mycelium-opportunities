@@ -1,0 +1,3 @@
+* text=auto eol=lf
+# Preserve public-source investigation snapshots, including upstream whitespace.
+docs/data-sources/*.html -text whitespace=-trailing-space
