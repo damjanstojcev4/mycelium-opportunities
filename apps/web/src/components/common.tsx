@@ -46,10 +46,14 @@ export function Empty({
     </div>
   );
 }
-export function Loading() {
+export function Spinner() {
+  return <span className="spinner" aria-hidden="true" />;
+}
+export function Loading({ label = 'Loading your workspace…' }: { label?: string }) {
   return (
     <div className="loading" role="status">
-      Loading your workspace…
+      <Spinner />
+      <span>{label}</span>
     </div>
   );
 }

@@ -4,16 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, date } from '@/lib/api';
 import { Heading, Loading, ErrorState, Badge } from './common';
 import { Button } from './ui/button';
-type Source = {
-  id: string;
-  name: string;
-  code: string;
-  enabled: boolean;
-  access_status: string;
-  interval_minutes: number;
-  last_success_at: string | null;
-  last_error: string | null;
-};
+import { SourceStatus, syncTime, type Source, type Run } from './source-status';
 type Review = {
   id: string;
   title: string;
@@ -22,22 +13,13 @@ type Review = {
   deadline_at: string | null;
   details: Record<string, unknown>;
 };
-type Run = {
-  id: string;
-  source_name: string;
-  status: string;
-  inserted: number;
-  updated: number;
-  rejected: number;
-  error: string | null;
-  started_at: string;
-};
 type Preview = { row: number; record?: Record<string, unknown>; error?: string };
 export function Admin() {
   const client = useQueryClient();
   const sources = useQuery({
     queryKey: ['admin-sources'],
     queryFn: () => api<Source[]>('/admin/sources'),
+    refetchInterval: 5000,
   });
   const queue = useQuery({
     queryKey: ['admin-review'],
@@ -47,6 +29,7 @@ export function Admin() {
   const runs = useQuery({
     queryKey: ['admin-runs'],
     queryFn: () => api<Run[]>('/admin/ingestion-runs'),
+    refetchInterval: 5000,
     enabled: !!sources.data,
   });
   const mutation = useMutation({
@@ -59,11 +42,12 @@ export function Admin() {
       body?: unknown;
       method?: string;
     }) => api(path, { method, body: body ? JSON.stringify(body) : undefined }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['admin-sources'] });
-      client.invalidateQueries({ queryKey: ['admin-review'] });
-      client.invalidateQueries({ queryKey: ['admin-runs'] });
-    },
+    onSuccess: () =>
+      Promise.all(
+        ['admin-sources', 'admin-review', 'admin-runs'].map((key) =>
+          client.invalidateQueries({ queryKey: [key] }),
+        ),
+      ),
   });
   const [sourceId, setSourceId] = useState('');
   const [type, setType] = useState('TENDER');
@@ -96,8 +80,23 @@ export function Admin() {
       preview.reset();
     },
   });
-  if (sources.isPending) return <Loading />;
-  if (sources.error) return <ErrorState error={sources.error} />;
+  if (sources.isPending)
+    return (
+      <>
+        <Heading eyebrow="SOURCE OPERATIONS" title="Trust starts at the source.">
+          Monitor collection, review changes and import permitted official datasets.
+        </Heading>
+        <section className="panel">
+          <Loading label="Loading source status…" />
+          <div className="skeleton-rows" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </div>
+        </section>
+      </>
+    );
+  if (sources.error && !sources.data) return <ErrorState error={sources.error} />;
   return (
     <>
       <Heading eyebrow="SOURCE OPERATIONS" title="Trust starts at the source.">
@@ -106,50 +105,26 @@ export function Admin() {
       {mutation.error && <ErrorState error={mutation.error} />}
       <section className="panel">
         <h3>Registered sources</h3>
+        <p className="muted">Status refreshes every 5 seconds while this panel is open.</p>
+        {sources.error && (
+          <ErrorState
+            error={
+              new Error(
+                'Source status could not refresh. Displayed information may be out of date.',
+              )
+            }
+          />
+        )}
         <div className="notice">
           Mark access verified only after confirming the source’s access and reuse conditions. A
           successful fetch alone does not establish permission.
         </div>
-        {sources.data.map((s) => (
-          <div className="admin-row" key={s.id}>
-            <div>
-              <strong>{s.name}</strong> <Badge>{s.access_status}</Badge>
-              <p>
-                Last complete synchronization: {date(s.last_success_at)} · Polling:{' '}
-                {s.interval_minutes} minutes
-              </p>
-              {s.last_error && <p className="field-error">{s.last_error}</p>}
-            </div>
-            <div className="admin-actions">
-              {s.code !== 'ESJN' && (
-                <>
-                  <Button
-                    variant="outline"
-                    disabled={mutation.isPending}
-                    onClick={() =>
-                      mutation.mutate({
-                        path: `/admin/sources/${s.id}`,
-                        method: 'PATCH',
-                        body: {
-                          enabled: !s.enabled,
-                          accessStatus: s.enabled ? s.access_status : 'VERIFIED',
-                          intervalMinutes: s.interval_minutes,
-                        },
-                      })
-                    }
-                  >
-                    {s.enabled ? 'Disable' : 'Verify access & enable'}
-                  </Button>
-                  <Button
-                    disabled={!s.enabled || mutation.isPending}
-                    onClick={() => mutation.mutate({ path: `/admin/sources/${s.id}/sync` })}
-                  >
-                    Sync
-                  </Button>
-                </>
-              )}
-            </div>
-          </div>
+        {sources.data?.map((s) => (
+          <SourceStatus
+            key={s.id}
+            source={s}
+            latestRun={runs.data?.find((run) => run.source_id === s.id)}
+          />
         ))}
       </section>
       <section className="panel">
@@ -159,7 +134,9 @@ export function Admin() {
           records require a new review.
         </p>
         {queue.error && <ErrorState error={queue.error} />}{' '}
-        {queue.data?.length ? (
+        {queue.isPending ? (
+          <Loading label="Loading review queue…" />
+        ) : queue.data?.length ? (
           queue.data.map((r) => (
             <div className="admin-row" key={r.id}>
               <div>
@@ -190,6 +167,12 @@ export function Admin() {
                       body: { status: 'APPROVED' },
                     })
                   }
+                  loading={
+                    mutation.isPending &&
+                    mutation.variables?.path === `/admin/opportunities/${r.id}/review` &&
+                    (mutation.variables?.body as { status?: string })?.status === 'APPROVED'
+                  }
+                  loadingText="Approving…"
                 >
                   Approve
                 </Button>
@@ -203,6 +186,12 @@ export function Admin() {
                       body: { status: 'REJECTED' },
                     })
                   }
+                  loading={
+                    mutation.isPending &&
+                    mutation.variables?.path === `/admin/opportunities/${r.id}/review` &&
+                    (mutation.variables?.body as { status?: string })?.status === 'REJECTED'
+                  }
+                  loadingText="Rejecting…"
                 >
                   Reject
                 </Button>
@@ -210,7 +199,7 @@ export function Admin() {
             </div>
           ))
         ) : (
-          <p className="muted">No records currently awaiting review.</p>
+          !queue.error && <p className="muted">No records currently awaiting review.</p>
         )}
       </section>
       <section className="panel">
@@ -219,62 +208,66 @@ export function Admin() {
           CSV (UTF-8) or XLSX · Up to 1,000 rows / 5 MB · ISO 8601 deadlines with timezone required.
           Imported records remain pending review.
         </p>
-        <div className="form-grid">
-          <label>
-            Source
-            <select
-              value={sourceId}
-              onChange={(e) => {
-                setSourceId(e.target.value);
-                preview.reset();
-              }}
-            >
-              <option value="">Choose a source</option>
-              {sources.data.map((s) => (
-                <option value={s.id} key={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Opportunity type
-            <select
-              value={type}
-              onChange={(e) => {
-                setType(e.target.value);
-                preview.reset();
-              }}
-            >
-              <option>TENDER</option>
-              <option>GRANT</option>
-            </select>
-          </label>
-          <label className="full">
-            Official export
-            <input
-              type="file"
-              accept=".csv,.xlsx"
-              onChange={(e) => {
-                setFile(e.target.files?.[0] || null);
-                preview.reset();
-              }}
-            />
-          </label>
-          <label className="full">
-            Column mapping (normalized field → export column)
-            <textarea
-              value={mapping}
-              onChange={(e) => {
-                setMapping(e.target.value);
-                preview.reset();
-              }}
-            />
-          </label>
-        </div>
+        <fieldset className="import-fields" disabled={preview.isPending || imported.isPending}>
+          <div className="form-grid">
+            <label>
+              Source
+              <select
+                value={sourceId}
+                onChange={(e) => {
+                  setSourceId(e.target.value);
+                  preview.reset();
+                }}
+              >
+                <option value="">Choose a source</option>
+                {sources.data?.map((s) => (
+                  <option value={s.id} key={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Opportunity type
+              <select
+                value={type}
+                onChange={(e) => {
+                  setType(e.target.value);
+                  preview.reset();
+                }}
+              >
+                <option>TENDER</option>
+                <option>GRANT</option>
+              </select>
+            </label>
+            <label className="full">
+              Official export
+              <input
+                type="file"
+                accept=".csv,.xlsx"
+                onChange={(e) => {
+                  setFile(e.target.files?.[0] || null);
+                  preview.reset();
+                }}
+              />
+            </label>
+            <label className="full">
+              Column mapping (normalized field → export column)
+              <textarea
+                value={mapping}
+                onChange={(e) => {
+                  setMapping(e.target.value);
+                  preview.reset();
+                }}
+              />
+            </label>
+          </div>
+        </fieldset>
         <Button
           variant="outline"
-          disabled={!file || !sourceId || preview.isPending}
+          loading={preview.isPending}
+          loadingText="Validating export…"
+          disabled={!file || !sourceId || imported.isPending}
           onClick={() => preview.mutate()}
         >
           Preview & validate
@@ -304,8 +297,13 @@ export function Admin() {
             </div>
             <Button
               disabled={
-                imported.isPending || !preview.data.length || preview.data.some((r) => r.error)
+                preview.isPending ||
+                imported.isPending ||
+                !preview.data.length ||
+                preview.data.some((r) => r.error)
               }
+              loading={imported.isPending}
+              loadingText="Importing records…"
               onClick={() => imported.mutate()}
             >
               Confirm import into review queue
@@ -320,10 +318,15 @@ export function Admin() {
           </div>
         )}
       </section>
-      <ManualEntry sources={sources.data} />
+      <ManualEntry sources={sources.data || []} />
       <section className="panel">
         <h3>Ingestion history</h3>
         {runs.error && <ErrorState error={runs.error} />}
+        {runs.isPending ? (
+          <Loading label="Loading ingestion history…" />
+        ) : !runs.error && !runs.data?.length ? (
+          <p className="muted">No sync runs yet. Start a source sync to see its results here.</p>
+        ) : null}
         <div className="table-wrap">
           <table>
             <thead>
@@ -339,8 +342,10 @@ export function Admin() {
               {runs.data?.map((r) => (
                 <tr key={r.id}>
                   <td>{r.source_name}</td>
-                  <td>{date(r.started_at)}</td>
-                  <td>{r.status}</td>
+                  <td>{syncTime(r.started_at)}</td>
+                  <td>
+                    <Badge>{r.status === 'RUNNING' ? 'RUNNING · awaiting result' : r.status}</Badge>
+                  </td>
                   <td>
                     {r.inserted} / {r.updated} / {r.rejected}
                   </td>
@@ -379,7 +384,7 @@ function DocumentUpload({ opportunityId }: { opportunityId: string }) {
           PDF file (up to 5 MB)
           <input type="file" accept=".pdf" name="file" required />
         </label>
-        <Button variant="outline" disabled={upload.isPending}>
+        <Button variant="outline" loading={upload.isPending} loadingText="Uploading & extracting…">
           Upload & extract text
         </Button>
       </form>
@@ -492,7 +497,7 @@ function ManualEntry({ sources }: { sources: Source[] }) {
             <textarea name="eligibility" />
           </label>
         </div>
-        <Button disabled={mutation.isPending} type="submit">
+        <Button loading={mutation.isPending} loadingText="Submitting for review…" type="submit">
           Add for review
         </Button>
         {mutation.error && <ErrorState error={mutation.error} />}{' '}
